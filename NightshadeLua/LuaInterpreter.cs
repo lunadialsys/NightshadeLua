@@ -86,55 +86,7 @@ public unsafe class LuaInterpreter : IDisposable
     
     public void PushValue(LuaValue baseValue)
     {
-        if (baseValue is LuaValue.None)
-        {
-            // it is impossible to push a none, so throw
-            throw new InvalidOperationException("attempt to push lua none to stack");
-        } else if (baseValue is LuaValue.Nil)
-        {
-            lua_pushnil(State);
-        } else if (baseValue is LuaValue.Boolean boolean)
-        {
-            lua_pushboolean(State, boolean.Value ? 1 : 0);
-        } else if (baseValue is LuaValue.LightUserdata lightuserdata)
-        {
-            lua_pushlightuserdata(State, (void*)lightuserdata.Value);
-        } else if (baseValue is LuaValue.Number number)
-        {
-            lua_pushnumber(State, number.Value);
-        } else if (baseValue is LuaValue.String @string)
-        {
-            var stringPtr = Marshal.StringToHGlobalAnsi(@string.Value);
-            lua_pushstring(State, (sbyte*)stringPtr);
-            Marshal.FreeHGlobal(stringPtr);
-        } else if (baseValue is LuaValue.Table table)
-        {
-            // location on the stack of the new table
-            var tableOffset = lua_gettop(State) + 1;
-            // push a new blank table
-            lua_createtable(State, 0, 0); // (== lua_newtable())
-            foreach (var pair in table.Members)
-            {
-                // recursively push the key,value pair
-                PushValue(pair.Key);
-                PushValue(pair.Value);
-                lua_settable(State, tableOffset);
-            }
-        } else if (baseValue is LuaValue.Function function)
-        {
-            // fetch the ref out of the function object. the function only gets unref'd when GC'd so we'll be fine.
-            // if you are mixing function objects for ones to a different interpreter (which won't be ref'd),
-            // ...then you very much won't be fine, though, so try not to do that.
-            // I have no idea what happens then, but it probably leads to a segfault.
-            lua_rawgeti(State, LuaUtil.RegistryIndex, function.@ref);
-        } else if (baseValue is LuaValue.Delegate @delegate)
-        {
-            lua_pushcclosure(State, (delegate* unmanaged[Cdecl]<lua_State*, int>)@delegate.Address, 0);
-        } else if (baseValue is LuaValue.Userdata)
-        {
-            // todo
-            throw new NotImplementedException();
-        }
+        LuaValue.Push(State, baseValue);
     }
     
     public void Call(int argcount, int returncount)
