@@ -6,7 +6,8 @@ namespace NightshadeLua;
 
 public static unsafe class LuaUtil
 {
-    public delegate int LuaDelegate(lua_State* func);
+    public delegate int LuaDelegate(lua_State* L);
+    public delegate int KFunction(lua_State* L, int status, nint ctx);
 
     public const int RegistryIndex = (-(int.MaxValue / 2 + 1000));
     

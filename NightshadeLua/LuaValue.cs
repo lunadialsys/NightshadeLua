@@ -2,15 +2,16 @@
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using NightshadeLua.Bindings;
+using static NightshadeLua.Bindings.Lua;
 
 namespace NightshadeLua;
 
-public record LuaValue
+public unsafe record LuaValue
 {
     public virtual LuaType Type => LuaType.None;
 
-    public static unsafe LuaValue From(lua_State* L, int idx)
-        => (LuaType)Lua.lua_type(L, idx) switch
+    public static LuaValue From(lua_State* L, int idx)
+        => (LuaType)lua_type(L, idx) switch
         {
             LuaType.None => new None(),
             LuaType.Nil => new Nil(),
@@ -25,13 +26,13 @@ public record LuaValue
             _ => throw new InvalidOperationException()
         };
     
-    public static unsafe LuaValue From(LuaInterpreter i, int idx)
+    public static LuaValue From(LuaInterpreter i, int idx)
         => From(i.State, idx);
 
-    public static unsafe LuaType TypeOf(lua_State* L, int idx)
-        => (LuaType)Lua.lua_type(L, idx);
+    public static LuaType TypeOf(lua_State* L, int idx)
+        => (LuaType)lua_type(L, idx);
 
-    public static unsafe LuaType TypeOf(LuaInterpreter i, int idx)
+    public static LuaType TypeOf(LuaInterpreter i, int idx)
         => TypeOf(i.State, idx);
     
     public static implicit operator string(LuaValue v) => v switch
@@ -54,6 +55,59 @@ public record LuaValue
         _ => throw new InvalidOperationException($"attempted to coerce LuaValue of type {v.Type} to number")
     };
     public static implicit operator LuaValue(double v) => new Number(v);
+    
+    public static void Push(lua_State* L, LuaValue baseValue)
+    {
+        if (baseValue is None)
+        {
+            // it is impossible to push a none, so throw
+            throw new InvalidOperationException("attempt to push lua none to stack");
+        } else if (baseValue is Nil)
+        {
+            lua_pushnil(L);
+        } else if (baseValue is Boolean boolean)
+        {
+            lua_pushboolean(L, boolean.Value ? 1 : 0);
+        } else if (baseValue is LightUserdata lightuserdata)
+        {
+            lua_pushlightuserdata(L, (void*)lightuserdata.Value);
+        } else if (baseValue is Number number)
+        {
+            lua_pushnumber(L, number.Value);
+        } else if (baseValue is String @string)
+        {
+            var stringPtr = Marshal.StringToHGlobalAnsi(@string.Value);
+            lua_pushstring(L, (sbyte*)stringPtr);
+            Marshal.FreeHGlobal(stringPtr);
+        } else if (baseValue is Table table)
+        {
+            // location on the stack of the new table
+            var tableOffset = lua_gettop(L) + 1;
+            // push a new blank table
+            lua_createtable(L, 0, 0); // (== lua_newtable())
+            foreach (var pair in table.Members)
+            {
+                // recursively push the key,value pair
+                Push(L, pair.Key);
+                Push(L, pair.Value);
+                lua_settable(L, tableOffset);
+            }
+        } else if (baseValue is Function function)
+        {
+            // fetch the ref out of the function object. the function only gets unref'd when GC'd so we'll be fine.
+            // if you are mixing function objects for ones to a different interpreter (which won't be ref'd),
+            // ...then you very much won't be fine, though, so try not to do that.
+            // I have no idea what happens then, but it probably leads to a segfault.
+            lua_rawgeti(L, LuaUtil.RegistryIndex, function.@ref);
+        } else if (baseValue is Delegate @delegate)
+        {
+            lua_pushcclosure(L, (delegate* unmanaged[Cdecl]<lua_State*, int>)@delegate.Address, 0);
+        } else if (baseValue is Userdata)
+        {
+            // todo
+            throw new NotImplementedException();
+        }
+    }
 
     // ReSharper disable MemberHidesStaticFromOuterClass, this is on purpose.
     public record None : LuaValue
@@ -73,9 +127,9 @@ public record LuaValue
         public static implicit operator bool(Boolean v) => v.Value;
         public static implicit operator Boolean(bool v) => new(v);
 
-        public new static unsafe Boolean From(lua_State* L, int idx)
+        public new static Boolean From(lua_State* L, int idx)
         {
-            var t = Lua.lua_toboolean(L, idx);
+            var t = lua_toboolean(L, idx);
             return new(t == 1);
         }
     }
@@ -84,9 +138,9 @@ public record LuaValue
     {
         public override LuaType Type => LuaType.LightUserdata;
         
-        public new static unsafe LightUserdata From(lua_State* L, int idx)
+        public new static LightUserdata From(lua_State* L, int idx)
         {
-            var t = Lua.lua_touserdata(L, idx);
+            var t = lua_touserdata(L, idx);
             return (nint)t != 0 ? new((nint)t) : null;
         }
     }
@@ -98,10 +152,10 @@ public record LuaValue
         public static implicit operator double(Number v) => v.Value;
         public static implicit operator Number(double v) => new(v);
         
-        public new static unsafe Number From(lua_State* L, int idx)
+        public new static Number From(lua_State* L, int idx)
         {
             int ok = 0;
-            var t = Lua.lua_tonumberx(L, idx, &ok);
+            var t = lua_tonumberx(L, idx, &ok);
             return ok == 1 ? new(t) : null;
         }
     }
@@ -115,9 +169,9 @@ public record LuaValue
 
         public override string ToString() => Value;
 
-        public new static unsafe String From(lua_State* L, int idx)
+        public new static String From(lua_State* L, int idx)
         {
-            var ptr = (nint)Lua.lua_tolstring(L, idx, null);
+            var ptr = (nint)lua_tolstring(L, idx, null);
             if (ptr == 0) return null;
             var r = Marshal.PtrToStringUTF8(ptr);
             return new(r);
@@ -153,11 +207,11 @@ public record LuaValue
             return new Table(contents);
         }
 
-        public new static unsafe Table From(lua_State* L, int idx)
+        public new static Table From(lua_State* L, int idx)
         {
             var contents = new Dictionary<LuaValue, LuaValue>();
             // push first key (nil means 'the first one', I guess)
-            Lua.lua_pushnil(L);
+            lua_pushnil(L);
             // lua_next's behaviour is to:
             //  - pop the key (@ idx -1)
             //  - then push a (value,key) pair onto the stack (in that order),
@@ -166,7 +220,7 @@ public record LuaValue
             //        -1: value
             //        -2: key
             //        -3: ...
-            while (Lua.lua_next(L, idx) != 0)
+            while (lua_next(L, idx) != 0)
             {
                 // retrieve k-v pair
                 var value = LuaValue.From(L, -1);
@@ -185,19 +239,19 @@ public record LuaValue
 
         private nint state;
 
-        unsafe ~Function()
+        ~Function()
         {
             // if we must, unref it when this object gets destructed (to unpin the corresponding object from the lua GC)
             if (state != 0)
                 Lauxlib.luaL_unref((lua_State*)state, LuaUtil.RegistryIndex, @ref);
         }
         
-        public new static unsafe Function From(lua_State* L, int idx)
+        public new static Function From(lua_State* L, int idx)
         {
-            if (Lua.lua_type(L, idx) != (int)LuaType.Function)
+            if (lua_type(L, idx) != (int)LuaType.Function)
                 throw new InvalidOperationException();
-            Lua.lua_pushnil(L); // push dummy nil
-            Lua.lua_copy(L, idx+1, -1); // copy the value to the dummy nil
+            lua_pushnil(L); // push dummy nil
+            lua_copy(L, idx+1, -1); // copy the value to the dummy nil
             var theRef = Lauxlib.luaL_ref(L, LuaUtil.RegistryIndex);
             // value will be popped by the luaL_ref call
             return new Function(theRef) { state = (nint)L };
@@ -232,10 +286,10 @@ public record LuaValue
         public required ulong Size;
         public required nint Pointer;
 
-        public new static unsafe Userdata From(lua_State* L, int idx)
+        public new static Userdata From(lua_State* L, int idx)
         {
-            var sz = Lua.lua_rawlen(L, idx);
-            var ptr = Lua.lua_touserdata(L, idx);
+            var sz = lua_rawlen(L, idx);
+            var ptr = lua_touserdata(L, idx);
             return new Userdata { Size = sz, Pointer = (nint)ptr };
         }
     }
@@ -246,9 +300,9 @@ public record LuaValue
 
         public required nint StatePointer;
 
-        public new static unsafe Coroutine From(lua_State* L, int idx)
+        public new static Coroutine From(lua_State* L, int idx)
         {
-            var state = Lua.lua_tothread(L, idx);
+            var state = lua_tothread(L, idx);
             return new Coroutine { StatePointer = (nint)state };
         }
     }
