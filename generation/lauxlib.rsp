@@ -1,0 +1,20 @@
+--file
+lauxlib.h
+--namespace
+NightshadeLua.Bindings
+--method-class-name
+Lauxlib
+--output
+../NightshadeLua.Bindings/Lauxlib.cs
+--library-path
+lua
+--header-file
+./header.txt
+--with-access-specifier
+*=Public
+--remap-type
+long double=double
+--remap-type
+_iobuf=void
+-x
+c

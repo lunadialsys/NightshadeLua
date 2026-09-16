@@ -330,4 +330,5 @@ ASALocalRun/
 .mfractor/
 
 # Lua headers
+!generation/*.rsp
 generation/*.h

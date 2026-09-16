@@ -1,0 +1,16 @@
+--file
+lualib.h
+--namespace
+NightshadeLua.Bindings
+--method-class-name
+Lualib
+--output
+../NightshadeLua.Bindings/Lualib.cs
+--library-path
+lua
+--header-file
+./header.txt
+--with-access-specifier
+*=Public
+-x
+c
