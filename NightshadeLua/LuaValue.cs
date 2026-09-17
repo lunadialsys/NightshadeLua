@@ -251,7 +251,7 @@ public unsafe record LuaValue
             if (lua_type(L, idx) != (int)LuaType.Function)
                 throw new InvalidOperationException();
             lua_pushnil(L); // push dummy nil
-            lua_copy(L, idx+1, -1); // copy the value to the dummy nil
+            lua_copy(L, idx, -1); // copy the value to the dummy nil
             var theRef = Lauxlib.luaL_ref(L, LuaUtil.RegistryIndex);
             // value will be popped by the luaL_ref call
             return new Function(theRef) { state = (nint)L };
