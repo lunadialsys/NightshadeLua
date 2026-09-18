@@ -22,9 +22,10 @@ public partial record LuaValue
     public abstract unsafe partial record WrappedUserdata
     {
         // ==[!!! THERE IS BESPOKE MEMORY MANAGEMENT HAPPENING HERE, BE CAREFUL !!!]==
-        // This dictionary exists to keep around a reference to the object, to ensure it does not get GC'd
-        // by the CLR's garbage collector before it has had a chance to get GC'd by Lua, which would inevitably
-        // lead to the dead object becoming a dangling pointer, and thus, causing a segfault when Lua next calls a method on it.
+        // This dictionary exists to keep around a reference to the object, to ensure it does not
+        // get picked up by the CLR's garbage collector before it has had a chance to get GC'd by Lua,
+        // which would inevitably lead to the dead object becoming a dangling pointer.
+        // This scenario will rapidly lead to a segfault, as Lua tries to call a method on a null object and promptly chokes.
         private static readonly Dictionary<Guid, WrappedUserdata> _gcInsurance = new();
 
         // Used to maintain a marking of object liveness across the managed-to-native bound.
