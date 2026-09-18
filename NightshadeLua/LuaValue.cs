@@ -1,12 +1,13 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using NightshadeLua.Bindings;
 using static NightshadeLua.Bindings.Lua;
 
 namespace NightshadeLua;
 
-public unsafe record LuaValue
+public unsafe partial record LuaValue
 {
     public virtual LuaType Type => LuaType.None;
 
@@ -21,9 +22,9 @@ public unsafe record LuaValue
             LuaType.String => String.From(L, idx),
             LuaType.Table => Table.From(L, idx),
             LuaType.Function => Function.From(L, idx),
-            LuaType.Userdata => Userdata.From(L, idx),
+            LuaType.Userdata => Userdata.From(L, idx), // FIXME AWFUL NATIVE CRASH HERE!
             LuaType.Thread => Coroutine.From(L, idx),
-            _ => throw new InvalidOperationException()
+            var f => throw new InvalidOperationException($"LuaValue.From called on bogus type {f}")
         };
     
     public static LuaValue From(LuaInterpreter i, int idx)
@@ -79,6 +80,12 @@ public unsafe record LuaValue
             var stringPtr = Marshal.StringToHGlobalAnsi(@string.Value);
             lua_pushstring(L, (sbyte*)stringPtr);
             Marshal.FreeHGlobal(stringPtr);
+        } else if (baseValue is ByteArray byteArray)
+        {
+            fixed (byte* p = byteArray.Value)
+            {
+                lua_pushstring(L, (sbyte*)p);
+            }
         } else if (baseValue is Table table)
         {
             // location on the stack of the new table
@@ -102,10 +109,12 @@ public unsafe record LuaValue
         } else if (baseValue is Delegate @delegate)
         {
             lua_pushcclosure(L, (delegate* unmanaged[Cdecl]<lua_State*, int>)@delegate.Address, 0);
-        } else if (baseValue is Userdata)
+        } else if (baseValue is WrappedUserdata wrappedUserdata)
         {
-            // todo
-            throw new NotImplementedException();
+            wrappedUserdata.CreateAndMarkAlive(L);
+        } else if (baseValue is Userdata userdata)
+        {
+            userdata.Create(L);
         }
     }
 
@@ -176,6 +185,14 @@ public unsafe record LuaValue
             var r = Marshal.PtrToStringUTF8(ptr);
             return new(r);
         }
+    }
+
+    /// <summary>
+    /// Marshalled as a string into Lua. Cannot be retrieved from LuaValue.From.
+    /// </summary>
+    public record ByteArray(byte[] Value) : LuaValue
+    {
+        public override LuaType Type => LuaType.String;
     }
     
     public record Table : LuaValue
@@ -249,7 +266,7 @@ public unsafe record LuaValue
         public new static Function From(lua_State* L, int idx)
         {
             if (lua_type(L, idx) != (int)LuaType.Function)
-                throw new InvalidOperationException();
+                throw new InvalidOperationException("not a function");
             lua_pushnil(L); // push dummy nil
             lua_copy(L, idx, -1); // copy the value to the dummy nil
             var theRef = Lauxlib.luaL_ref(L, LuaUtil.RegistryIndex);
@@ -283,17 +300,106 @@ public unsafe record LuaValue
     {
         public override LuaType Type => LuaType.Userdata;
 
-        public required ulong Size;
-        public required nint Pointer;
+        public ulong Size;
+        
+        /// <summary>
+        /// Setting this member yourself serves no purpose.
+        /// This member will only be set after the userdata is pushed to the stack.
+        /// </summary>
+        // ReSharper disable once NotAccessedField.Global, see above doc comment.
+        public nint Pointer = -1;
 
+        public string MetatableType;
+        public Table Metatable;
+        
+        /// <summary>
+        /// Keys MUST be in the range of {1 .. count}, otherwise the library will misbehave.
+        /// </summary>
+        public Dictionary<int, LuaValue> Members;
+
+        public void Create(lua_State* L)
+        {
+            // create the userdata
+            Pointer = (nint)lua_newuserdatauv(L, (nuint)Size, Members.Count);
+            Unsafe.InitBlock((void*)Pointer, 0, (uint)Size);
+            
+            // put the values out of Members into it
+            foreach (var pair in Members)
+            {
+                Push(L, pair.Value);
+                lua_setiuservalue(L, -2, pair.Key);
+            }
+            
+            // copy the metatable & tag it with some more info
+            var newMetaMembers = new Dictionary<LuaValue, LuaValue>
+            {
+                ["__nightshadelua_MemberCount"] = Members.Count,
+                ["__nightshadelua_MetaType"] = MetatableType
+            };
+            foreach (var pair in Metatable.Members)
+            {
+                newMetaMembers[pair.Key] = pair.Value;
+            }
+            var newMetatable = new Table(newMetaMembers);
+            
+            // push & set the userdata's metatable
+            Push(L, newMetatable);
+            lua_setmetatable(L, -2);
+            
+            // done, the topmost item on the stack will now be the userdata
+        }
+        
         public new static Userdata From(lua_State* L, int idx)
         {
+            var hasMeta = lua_getmetatable(L, idx) == 1;
+            if (!hasMeta)
+                throw new InvalidOperationException("no metatable, is this a NightshadeLua userdata?");
+
+            var metatable = Table.From(L, -1);
+            LuaUtil.Pop(L, 1); // pop the metatable off the stack after we retrieve it
+
+            var memberCountValue = (Number)metatable.Get("__nightshadelua_MemberCount");
+            var metaTypeValue = (String)metatable.Get("__nightshadelua_MetaType");
+
+            var memberCount = (int)memberCountValue.Value;
+            var metaType = metaTypeValue.Value;
+
+            var members = new Dictionary<int, LuaValue>();
+            for (var i = 1; i <= memberCount; i++)
+            {
+                // put the datum on the top of the stack...
+                var valueType = (LuaType)lua_getiuservalue(L, idx, i);
+                if (valueType is LuaType.None)
+                    throw new InvalidOperationException($"was unable to retrieve userdata member @ i={i}");
+                // retrieve it...
+                var datum = LuaValue.From(L, -1);
+                // then pop it
+                LuaUtil.Pop(L, 1);
+                // and then copy it into the members table
+                members[i] = datum;
+            }
+            
+            // then, we can retrieve the native data
             var sz = lua_rawlen(L, idx);
             var ptr = lua_touserdata(L, idx);
-            return new Userdata { Size = sz, Pointer = (nint)ptr };
+            
+            return new Userdata
+            {
+                Size = sz,
+                Pointer = (nint)ptr,
+                MetatableType = metaType,
+                Metatable = metatable,
+                Members = members
+            };
         }
     }
-    
+
+    public partial record WrappedUserdata : Userdata
+    {
+        // this type's main implementation lives in LuaValue.WrappedUserdata.cs because it's massive.
+        // (seriously, this one record would increase the code size of this file by half.)
+    }
+
     public record Coroutine : LuaValue
     {
         public override LuaType Type => LuaType.Thread;
