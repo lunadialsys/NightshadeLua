@@ -1,4 +1,6 @@
-﻿using System.Runtime.InteropServices;
+﻿using System;
+using System.Runtime.InteropServices;
+using System.Text;
 using NightshadeLua.Bindings;
 using static NightshadeLua.Bindings.Lua;
 
@@ -10,6 +12,34 @@ public static unsafe class LuaUtil
     public delegate int KFunction(lua_State* L, int status, nint ctx);
 
     public const int RegistryIndex = (-(int.MaxValue / 2 + 1000));
+
+    public static LuaResult LoadBytes(lua_State* L, byte[] code, string chunkname, string mode = "t")
+    {
+        int errorCode;
+        fixed (byte* f = code)
+        fixed (byte* name = Encoding.UTF8.GetBytes(chunkname))
+        fixed (byte* pMode = Encoding.UTF8.GetBytes(mode))
+        {
+            var fedTheChunk = false;
+            sbyte* Reader(lua_State* _L, void* ptr, nint* size)
+            {
+                if (!fedTheChunk)
+                {
+                    fedTheChunk = true;
+                    *size = code.Length;
+                    return (sbyte*)ptr;
+                }
+                return (sbyte*)0;
+            }
+
+            var reader = Marshal.GetFunctionPointerForDelegate(Reader);
+            errorCode = lua_load(L,
+                (delegate* unmanaged[Cdecl]<lua_State*, void*, UIntPtr*, sbyte*>)reader,
+                f, (sbyte*)name, (sbyte*)pMode);
+        }
+
+        return (LuaResult)errorCode;
+    }
     
     public static void Pop(lua_State* L, int count)
     {
